@@ -1,0 +1,8 @@
+{
+  "name": "Real Shop Angola",
+  "description": "Marketplace angolano focado em confiança, conectando vendedores locais a compradores com pagamentos seguros e chat integrado.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ]
+}
