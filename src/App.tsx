@@ -359,6 +359,7 @@ const AuthModal = ({ onClose }: { onClose: () => void }) => {
                       className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 focus:bg-white rounded-2xl py-4 pl-24 pr-4 outline-none transition-all text-sm font-medium"
                     />
                   </div>
+                  <p className="text-[10px] text-zinc-400 mt-1.5 ml-1 font-medium italic">Digite apenas os 9 dígitos do seu número.</p>
                 </div>
 
                 <div>
