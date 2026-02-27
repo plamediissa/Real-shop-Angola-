@@ -172,18 +172,24 @@ const AuthModal = ({ onClose }: { onClose: () => void }) => {
     if (!(window as any).recaptchaVerifier) {
       try {
         (window as any).recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
-          size: 'invisible',
+          size: 'normal', // Mudado para normal para ser visível e mais confiável
           callback: () => {
-            console.log('reCAPTCHA solved');
+            console.log('reCAPTCHA resolvido com sucesso');
+          },
+          'expired-callback': () => {
+            setError("O reCAPTCHA expirou. Por favor, tente novamente.");
           }
         });
+        (window as any).recaptchaVerifier.render();
       } catch (err) {
-        console.error("Recaptcha init error:", err);
+        console.error("Erro ao inicializar Recaptcha:", err);
       }
     }
     return () => {
       if ((window as any).recaptchaVerifier) {
-        (window as any).recaptchaVerifier.clear();
+        try {
+          (window as any).recaptchaVerifier.clear();
+        } catch (e) {}
         (window as any).recaptchaVerifier = null;
       }
     };
@@ -203,19 +209,46 @@ const AuthModal = ({ onClose }: { onClose: () => void }) => {
 
     setLoading(true);
     try {
-      const formattedPhone = phone.startsWith('+') ? phone : `+244${phone.replace(/\s/g, '')}`;
+      // Melhorar a formatação do número
+      let cleanPhone = phone.replace(/\D/g, ''); // Remove tudo que não é número
+      
+      // Se o usuário já digitou o código do país 244, removemos para não duplicar
+      if (cleanPhone.startsWith('244') && cleanPhone.length > 3) {
+        cleanPhone = cleanPhone.substring(3);
+      }
+      
+      const formattedPhone = `+244${cleanPhone}`;
+      console.log("Tentando enviar SMS para:", formattedPhone);
+
       const appVerifier = (window as any).recaptchaVerifier;
       const result = await signInWithPhoneNumber(auth, formattedPhone, appVerifier);
       setConfirmationResult(result);
       setStep(2);
     } catch (err: any) {
-      console.error("SMS Error:", err);
+      console.error("SMS Error Details:", err);
+      
+      // Mensagens de erro mais específicas
       if (err.code === 'auth/invalid-phone-number') {
-        setError("Número de telefone inválido. Use o formato +244XXXXXXXXX.");
+        setError("Número de telefone inválido. Verifique se digitou corretamente.");
       } else if (err.code === 'auth/too-many-requests') {
-        setError("Muitas tentativas. Tente novamente mais tarde.");
+        setError("Muitas tentativas seguidas. Por favor, aguarde alguns minutos.");
+      } else if (err.code === 'auth/unauthorized-domain') {
+        setError("Este domínio não está autorizado no Firebase. Adicione o link do app em 'Domínios Autorizados' no Console do Firebase.");
+      } else if (err.code === 'auth/operation-not-allowed') {
+        setError("O login por telefone não está ativado no seu projeto Firebase.");
       } else {
-        setError("Erro ao enviar SMS. Verifique sua conexão e o número.");
+        setError(`Erro (${err.code || 'desconhecido'}): Verifique sua conexão e se o Phone Auth está ativo no Firebase.`);
+      }
+      
+      // Resetar o recaptcha em caso de erro para permitir nova tentativa
+      if ((window as any).recaptchaVerifier) {
+        try {
+          (window as any).recaptchaVerifier.render().then((widgetId: any) => {
+            (window as any).grecaptcha.reset(widgetId);
+          });
+        } catch (e) {
+          console.error("Erro ao resetar recaptcha:", e);
+        }
       }
     } finally {
       setLoading(false);
@@ -266,7 +299,7 @@ const AuthModal = ({ onClose }: { onClose: () => void }) => {
         animate={{ opacity: 1, scale: 1, y: 0 }}
         className="bg-white w-full max-w-md rounded-[2.5rem] p-8 shadow-2xl relative overflow-hidden"
       >
-        <div id="recaptcha-container"></div>
+        <div id="recaptcha-container" className="flex justify-center mb-4 min-h-[78px]"></div>
         
         <div className="text-center mb-8">
           <div className="w-20 h-20 bg-emerald-50 text-emerald-600 rounded-3xl flex items-center justify-center mx-auto mb-6 shadow-inner">
@@ -312,15 +345,18 @@ const AuthModal = ({ onClose }: { onClose: () => void }) => {
                 </div>
 
                 <div>
-                  <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Telefone (+244)</label>
+                  <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Telefone</label>
                   <div className="relative group">
-                    <Phone className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 group-focus-within:text-emerald-500 transition-colors" />
+                    <div className="absolute left-4 top-1/2 -translate-y-1/2 flex items-center gap-2 pointer-events-none">
+                      <Phone className="w-4 h-4 text-zinc-400 group-focus-within:text-emerald-500 transition-colors" />
+                      <span className="text-sm font-bold text-zinc-400 border-r border-zinc-200 pr-2">+244</span>
+                    </div>
                     <input 
                       type="tel" 
                       value={phone}
                       onChange={(e) => setPhone(e.target.value)}
                       placeholder="9xx xxx xxx"
-                      className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 focus:bg-white rounded-2xl py-4 pl-12 pr-4 outline-none transition-all text-sm font-medium"
+                      className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 focus:bg-white rounded-2xl py-4 pl-24 pr-4 outline-none transition-all text-sm font-medium"
                     />
                   </div>
                 </div>
