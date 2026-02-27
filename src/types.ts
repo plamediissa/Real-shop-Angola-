@@ -1,15 +1,16 @@
 export interface User {
-  id: number;
+  id: string;
   phone: string;
   name: string;
+  password?: string;
   role: 'buyer' | 'seller';
   verified: number;
-  created_at: string;
+  created_at: any;
 }
 
 export interface Product {
-  id: number;
-  seller_id: number;
+  id: string;
+  seller_id: string;
   seller_name: string;
   seller_verified: number;
   name: string;
@@ -19,35 +20,35 @@ export interface Product {
   category: string;
   image_url: string;
   delivery_method: string;
-  created_at: string;
+  created_at: any;
 }
 
 export interface Message {
-  id: number;
-  sender_id: number;
+  id: string;
+  sender_id: string;
   sender_name: string;
-  receiver_id: number;
-  product_id: number;
+  receiver_id: string;
+  product_id: string;
   content: string;
-  created_at: string;
+  created_at: any;
 }
 
 export interface Order {
-  id: number;
-  product_id: number;
-  buyer_id: number;
+  id: string;
+  product_id: string;
+  buyer_id: string;
   status: 'pending' | 'paid' | 'delivered';
   payment_method: string;
   payment_reference?: string;
-  created_at: string;
+  created_at: any;
 }
 
 export interface Review {
-  id: number;
-  seller_id: number;
-  buyer_id: number;
+  id: string;
+  seller_id: string;
+  buyer_id: string;
   buyer_name: string;
   rating: number;
   comment: string;
-  created_at: string;
+  created_at: any;
 }

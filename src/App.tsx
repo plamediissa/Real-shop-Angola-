@@ -13,10 +13,33 @@ import {
   Package,
   CreditCard,
   Truck,
-  LogOut
+  LogOut,
+  Lock,
+  ShieldCheck
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { User, Product, Message, Review } from './types';
+import { auth, db } from './firebase';
+import { 
+  RecaptchaVerifier, 
+  signInWithPhoneNumber, 
+  onAuthStateChanged, 
+  signOut,
+  ConfirmationResult
+} from "firebase/auth";
+import { 
+  collection, 
+  addDoc, 
+  query, 
+  onSnapshot, 
+  orderBy, 
+  where, 
+  doc, 
+  getDoc, 
+  setDoc,
+  Timestamp,
+  limit
+} from "firebase/firestore";
 
 // --- Components ---
 
@@ -62,7 +85,7 @@ const Navbar = ({ user, onLogout, onOpenAuth, onOpenPost }: {
             </button>
             <div className="flex items-center gap-2 pl-2 border-l border-zinc-100">
               <div className="w-8 h-8 bg-zinc-200 rounded-full flex items-center justify-center text-zinc-600 font-medium text-xs">
-                {user.name[0]}
+                {user.name ? user.name[0] : '?'}
               </div>
               <button onClick={onLogout} className="p-2 text-zinc-400 hover:text-red-500 transition-colors">
                 <LogOut className="w-4 h-4" />
@@ -120,7 +143,7 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onClick }) => (
       <div className="flex items-center justify-between pt-3 border-t border-zinc-50">
         <div className="flex items-center gap-1.5">
           <div className="w-5 h-5 bg-zinc-100 rounded-full flex items-center justify-center text-[8px] font-bold">
-            {product.seller_name[0]}
+            {product.seller_name ? product.seller_name[0] : '?'}
           </div>
           <span className="text-xs text-zinc-600 font-medium">{product.seller_name}</span>
           {product.seller_verified === 1 && <CheckCircle className="w-3 h-3 text-blue-500" />}
@@ -134,163 +157,320 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onClick }) => (
   </motion.div>
 );
 
-const AuthModal = ({ onClose, onLogin }: { onClose: () => void, onLogin: (u: User) => void }) => {
+const AuthModal = ({ onClose }: { onClose: () => void }) => {
   const [phone, setPhone] = useState('');
   const [name, setName] = useState('');
+  const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
   const [role, setRole] = useState<'buyer' | 'seller'>('buyer');
-  const [step, setStep] = useState(1); // 1: Phone, 2: Name/Role, 3: OTP
+  const [step, setStep] = useState(1); // 1: Form, 2: OTP
+  const [confirmationResult, setConfirmationResult] = useState<ConfirmationResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const requestOtp = async () => {
-    await fetch('/api/auth/request-otp', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phone })
-    });
-    setStep(2);
+  useEffect(() => {
+    if (!(window as any).recaptchaVerifier) {
+      try {
+        (window as any).recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
+          size: 'invisible',
+          callback: () => {
+            console.log('reCAPTCHA solved');
+          }
+        });
+      } catch (err) {
+        console.error("Recaptcha init error:", err);
+      }
+    }
+    return () => {
+      if ((window as any).recaptchaVerifier) {
+        (window as any).recaptchaVerifier.clear();
+        (window as any).recaptchaVerifier = null;
+      }
+    };
+  }, []);
+
+  const handleStartRegistration = async () => {
+    setError(null);
+    if (!name.trim() || !phone.trim() || !password.trim()) {
+      setError("Por favor, preencha todos os campos obrigatórios.");
+      return;
+    }
+
+    if (phone.length < 9) {
+      setError("O número de telefone parece inválido.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const formattedPhone = phone.startsWith('+') ? phone : `+244${phone.replace(/\s/g, '')}`;
+      const appVerifier = (window as any).recaptchaVerifier;
+      const result = await signInWithPhoneNumber(auth, formattedPhone, appVerifier);
+      setConfirmationResult(result);
+      setStep(2);
+    } catch (err: any) {
+      console.error("SMS Error:", err);
+      if (err.code === 'auth/invalid-phone-number') {
+        setError("Número de telefone inválido. Use o formato +244XXXXXXXXX.");
+      } else if (err.code === 'auth/too-many-requests') {
+        setError("Muitas tentativas. Tente novamente mais tarde.");
+      } else {
+        setError("Erro ao enviar SMS. Verifique sua conexão e o número.");
+      }
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleAuth = async () => {
-    const res = await fetch('/api/auth/verify-otp', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phone, code, name, role })
-    });
-    if (res.ok) {
-      const user = await res.json();
-      onLogin(user);
+  const handleVerifyOtp = async () => {
+    setError(null);
+    if (code.length < 6) {
+      setError("O código deve ter 6 dígitos.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      if (!confirmationResult) throw new Error("Sessão expirada. Recomece o processo.");
+      const result = await confirmationResult.confirm(code);
+      const firebaseUser = result.user;
+
+      // Save user profile to Firestore
+      await setDoc(doc(db, "users", firebaseUser.uid), {
+        id: firebaseUser.uid,
+        phone: firebaseUser.phoneNumber,
+        name: name,
+        password: password, // Note: For security, passwords should ideally be handled by Auth providers, but saving as requested
+        role: role,
+        verified: 1,
+        created_at: Timestamp.now()
+      });
+      
       onClose();
-    } else {
-      alert("Código inválido");
+    } catch (err: any) {
+      console.error("Verify Error:", err);
+      if (err.code === 'auth/invalid-verification-code') {
+        setError("Código de verificação incorreto.");
+      } else {
+        setError("Erro ao confirmar código. Tente novamente.");
+      }
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-zinc-900/60 backdrop-blur-md">
       <motion.div 
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
-        className="bg-white w-full max-w-md rounded-3xl p-8 shadow-2xl"
+        initial={{ opacity: 0, scale: 0.9, y: 20 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        className="bg-white w-full max-w-md rounded-[2.5rem] p-8 shadow-2xl relative overflow-hidden"
       >
+        <div id="recaptcha-container"></div>
+        
         <div className="text-center mb-8">
-          <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
-            <Phone className="w-8 h-8" />
+          <div className="w-20 h-20 bg-emerald-50 text-emerald-600 rounded-3xl flex items-center justify-center mx-auto mb-6 shadow-inner">
+            <ShieldCheck className="w-10 h-10" />
           </div>
-          <h2 className="text-2xl font-bold text-zinc-900">Bem-vindo à Real Shop</h2>
-          <p className="text-zinc-500 mt-2">A maior rede de confiança de Angola</p>
+          <h2 className="text-3xl font-black text-zinc-900 tracking-tight">Criar Conta</h2>
+          <p className="text-zinc-500 mt-2 text-sm font-medium">Real Shop Angola — Sua rede de confiança</p>
         </div>
 
-        {step === 1 && (
-          <div className="space-y-4">
-            <div>
-              <label className="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2">Número de Telefone</label>
-              <div className="relative">
-                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-zinc-400 font-medium">+244</span>
+        {error && (
+          <motion.div 
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-red-50 border border-red-100 text-red-600 px-4 py-3 rounded-2xl text-xs font-bold mb-6 flex items-center gap-2"
+          >
+            <div className="w-1.5 h-1.5 bg-red-600 rounded-full animate-pulse" />
+            {error}
+          </motion.div>
+        )}
+
+        <AnimatePresence mode="wait">
+          {step === 1 ? (
+            <motion.div 
+              key="step1"
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 20 }}
+              className="space-y-5"
+            >
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Nome Completo</label>
+                  <div className="relative group">
+                    <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 group-focus-within:text-emerald-500 transition-colors" />
+                    <input 
+                      type="text" 
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      placeholder="Ex: Manuel dos Santos"
+                      className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 focus:bg-white rounded-2xl py-4 pl-12 pr-4 outline-none transition-all text-sm font-medium"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Telefone (+244)</label>
+                  <div className="relative group">
+                    <Phone className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 group-focus-within:text-emerald-500 transition-colors" />
+                    <input 
+                      type="tel" 
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value)}
+                      placeholder="9xx xxx xxx"
+                      className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 focus:bg-white rounded-2xl py-4 pl-12 pr-4 outline-none transition-all text-sm font-medium"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Senha</label>
+                  <div className="relative group">
+                    <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 group-focus-within:text-emerald-500 transition-colors" />
+                    <input 
+                      type="password" 
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="••••••••"
+                      className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 focus:bg-white rounded-2xl py-4 pl-12 pr-4 outline-none transition-all text-sm font-medium"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Tipo de Conta</label>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button 
+                      onClick={() => setRole('buyer')}
+                      className={`py-3.5 rounded-2xl border-2 font-bold text-xs transition-all ${role === 'buyer' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-zinc-100 text-zinc-400 hover:border-zinc-200'}`}
+                    >
+                      Comprador
+                    </button>
+                    <button 
+                      onClick={() => setRole('seller')}
+                      className={`py-3.5 rounded-2xl border-2 font-bold text-xs transition-all ${role === 'seller' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-zinc-100 text-zinc-400 hover:border-zinc-200'}`}
+                    >
+                      Vendedor
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <button 
+                onClick={handleStartRegistration}
+                disabled={loading}
+                className="w-full bg-emerald-600 text-white py-4.5 rounded-2xl font-black hover:bg-emerald-700 transition-all shadow-xl shadow-emerald-600/20 flex items-center justify-center gap-2 mt-4 disabled:opacity-50"
+              >
+                {loading ? (
+                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                ) : (
+                  <>Criar Conta <ArrowRight className="w-5 h-5" /></>
+                )}
+              </button>
+              
+              <button 
+                onClick={onClose} 
+                className="w-full text-zinc-400 text-xs font-bold hover:text-zinc-600 transition-colors py-2"
+              >
+                Já tenho uma conta? Entrar
+              </button>
+            </motion.div>
+          ) : (
+            <motion.div 
+              key="step2"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              className="space-y-8"
+            >
+              <div className="text-center space-y-2">
+                <p className="text-sm text-zinc-500 font-medium">Enviamos um código SMS para</p>
+                <p className="text-lg font-black text-zinc-900 tracking-tight">+244 {phone}</p>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-4 text-center">Código de 6 Dígitos</label>
                 <input 
-                  type="tel" 
-                  value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  placeholder="9xx xxx xxx"
-                  className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 rounded-2xl py-4 pl-16 pr-4 outline-none transition-all"
+                  type="text" 
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  placeholder="000000"
+                  maxLength={6}
+                  className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 rounded-[2rem] py-6 px-4 outline-none transition-all text-center text-4xl tracking-[0.4em] font-black placeholder:text-zinc-200"
                 />
               </div>
-            </div>
-            <button 
-              onClick={requestOtp}
-              disabled={!phone}
-              className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold hover:bg-emerald-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
-            >
-              Receber Código <ArrowRight className="w-5 h-5" />
-            </button>
-          </div>
-        )}
 
-        {step === 2 && (
-          <div className="space-y-4">
-            <div>
-              <label className="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2">Seu Nome Completo</label>
-              <input 
-                type="text" 
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Ex: João Manuel"
-                className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 rounded-2xl py-4 px-4 outline-none transition-all"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2">Eu quero...</label>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-4">
                 <button 
-                  onClick={() => setRole('buyer')}
-                  className={`py-3 rounded-xl border-2 font-medium transition-all ${role === 'buyer' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-zinc-100 text-zinc-500'}`}
+                  onClick={handleVerifyOtp}
+                  disabled={code.length < 6 || loading}
+                  className="w-full bg-emerald-600 text-white py-4.5 rounded-2xl font-black hover:bg-emerald-700 transition-all shadow-xl shadow-emerald-600/20 flex items-center justify-center gap-2 disabled:opacity-50"
                 >
-                  Comprar
+                  {loading ? (
+                    <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  ) : (
+                    "Confirmar Código"
+                  )}
                 </button>
                 <button 
-                  onClick={() => setRole('seller')}
-                  className={`py-3 rounded-xl border-2 font-medium transition-all ${role === 'seller' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-zinc-100 text-zinc-500'}`}
+                  onClick={() => setStep(1)} 
+                  disabled={loading}
+                  className="w-full text-zinc-400 text-xs font-bold hover:text-zinc-600 transition-colors"
                 >
-                  Vender
+                  Voltar e corrigir dados
                 </button>
               </div>
-            </div>
-            <button 
-              onClick={() => setStep(3)}
-              disabled={!name}
-              className="w-full bg-zinc-900 text-white py-4 rounded-2xl font-bold hover:bg-zinc-800 transition-all"
-            >
-              Próximo
-            </button>
-            <button onClick={() => setStep(1)} className="w-full text-zinc-400 text-sm font-medium">Voltar</button>
-          </div>
-        )}
-
-        {step === 3 && (
-          <div className="space-y-4">
-            <div>
-              <label className="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2">Código SMS</label>
-              <input 
-                type="text" 
-                value={code}
-                onChange={(e) => setCode(e.target.value)}
-                placeholder="4 dígitos"
-                maxLength={4}
-                className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 rounded-2xl py-4 px-4 outline-none transition-all text-center text-2xl tracking-[1em] font-bold"
-              />
-            </div>
-            <button 
-              onClick={handleAuth}
-              disabled={code.length < 4}
-              className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold hover:bg-emerald-700 transition-all"
-            >
-              Verificar e Entrar
-            </button>
-            <button onClick={() => setStep(2)} className="w-full text-zinc-400 text-sm font-medium">Voltar</button>
-          </div>
-        )}
+            </motion.div>
+          )}
+        </AnimatePresence>
       </motion.div>
     </div>
   );
 };
 
-const PostModal = ({ user, onClose, onPost }: { user: User, onClose: () => void, onPost: () => void }) => {
+const PostModal = ({ user, onClose }: { user: User, onClose: () => void }) => {
   const [form, setForm] = useState({
     name: '',
     description: '',
     price: '',
     location: 'Luanda',
     category: 'Eletrónicos',
-    delivery_method: 'Entrega em mãos'
+    delivery_method: 'Entrega em mãos',
+    image_url: ''
   });
+  const [loading, setLoading] = useState(false);
+
+  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setForm({ ...form, image_url: reader.result as string });
+      };
+      reader.readAsDataURL(file);
+    }
+  };
 
   const handleSubmit = async () => {
-    await fetch('/api/products', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...form, seller_id: user.id, price: parseFloat(form.price), image_url: '' })
-    });
-    onPost();
-    onClose();
+    setLoading(true);
+    try {
+      await addDoc(collection(db, "products"), {
+        ...form,
+        seller_id: user.id,
+        seller_name: user.name,
+        seller_verified: user.verified || 0,
+        price: parseFloat(form.price),
+        created_at: Timestamp.now()
+      });
+      onClose();
+    } catch (error) {
+      console.error("Post Error:", error);
+      alert("Erro ao publicar produto.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -308,6 +488,34 @@ const PostModal = ({ user, onClose, onPost }: { user: User, onClose: () => void,
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div className="space-y-4">
             <div>
+              <label className="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2">Foto do Produto</label>
+              <div 
+                onClick={() => document.getElementById('product-image')?.click()}
+                className="aspect-square bg-zinc-50 border-2 border-dashed border-zinc-200 rounded-2xl flex flex-col items-center justify-center cursor-pointer hover:bg-zinc-100 transition-all overflow-hidden relative group"
+              >
+                {form.image_url ? (
+                  <>
+                    <img src={form.image_url} alt="Preview" className="w-full h-full object-cover" />
+                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                      <PlusCircle className="w-8 h-8 text-white" />
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <PlusCircle className="w-8 h-8 text-zinc-300 mb-2" />
+                    <span className="text-xs text-zinc-400 font-medium">Clique para adicionar foto</span>
+                  </>
+                )}
+              </div>
+              <input 
+                id="product-image"
+                type="file" 
+                accept="image/*"
+                onChange={handleImageChange}
+                className="hidden"
+              />
+            </div>
+            <div>
               <label className="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2">Nome do Produto</label>
               <input 
                 type="text" 
@@ -316,6 +524,9 @@ const PostModal = ({ user, onClose, onPost }: { user: User, onClose: () => void,
                 className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 rounded-xl py-3 px-4 outline-none"
               />
             </div>
+          </div>
+
+          <div className="space-y-4">
             <div>
               <label className="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2">Descrição</label>
               <textarea 
@@ -325,9 +536,6 @@ const PostModal = ({ user, onClose, onPost }: { user: User, onClose: () => void,
                 className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 rounded-xl py-3 px-4 outline-none resize-none"
               />
             </div>
-          </div>
-
-          <div className="space-y-4">
             <div>
               <label className="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2">Preço (Kz)</label>
               <input 
@@ -385,28 +593,50 @@ const PostModal = ({ user, onClose, onPost }: { user: User, onClose: () => void,
 
         <button 
           onClick={handleSubmit}
-          className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold mt-8 hover:bg-emerald-700 transition-all"
+          disabled={loading}
+          className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold mt-8 hover:bg-emerald-700 transition-all disabled:opacity-50"
         >
-          Publicar Agora
+          {loading ? "Publicando..." : "Publicar Agora"}
         </button>
       </motion.div>
     </div>
   );
 };
 
-const ProductDetail = ({ product, user, onClose, onSendMessage }: { product: Product, user: User | null, onClose: () => void, onSendMessage: (content: string) => void }) => {
+const ProductDetail = ({ product, user, onClose }: { product: Product, user: User | null, onClose: () => void }) => {
   const [message, setMessage] = useState('');
   const [paymentRef, setPaymentRef] = useState<{ entity: string, reference: string } | null>(null);
 
   const generateReference = async () => {
     if (!user) return;
-    const res = await fetch('/api/payments/generate-reference', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ productId: product.id, buyerId: user.id })
+    // Mock reference generation for demo
+    const reference = Math.floor(100000000 + Math.random() * 900000000).toString();
+    const entity = "00123";
+    
+    await addDoc(collection(db, "orders"), {
+      product_id: product.id,
+      buyer_id: user.id,
+      status: 'pending',
+      payment_method: 'multicaixa',
+      payment_reference: reference,
+      created_at: Timestamp.now()
     });
-    const data = await res.json();
-    setPaymentRef(data);
+
+    setPaymentRef({ entity, reference });
+  };
+
+  const handleSendMessage = async () => {
+    if (!user || !message.trim()) return;
+    await addDoc(collection(db, "messages"), {
+      sender_id: user.id,
+      sender_name: user.name,
+      receiver_id: product.seller_id,
+      product_id: product.id,
+      content: message,
+      created_at: Timestamp.now()
+    });
+    setMessage('');
+    alert("Mensagem enviada!");
   };
 
   return (
@@ -458,7 +688,7 @@ const ProductDetail = ({ product, user, onClose, onSendMessage }: { product: Pro
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <div className="w-12 h-12 bg-white rounded-xl shadow-sm flex items-center justify-center text-lg font-bold text-zinc-400">
-                  {product.seller_name[0]}
+                  {product.seller_name ? product.seller_name[0] : '?'}
                 </div>
                 <div>
                   <div className="flex items-center gap-1.5">
@@ -541,10 +771,7 @@ const ProductDetail = ({ product, user, onClose, onSendMessage }: { product: Pro
                 className="flex-1 bg-zinc-50 rounded-2xl px-4 outline-none text-sm"
               />
               <button 
-                onClick={() => {
-                  onSendMessage(message);
-                  setMessage('');
-                }}
+                onClick={handleSendMessage}
                 className="bg-emerald-600 text-white px-6 py-3 rounded-2xl font-bold hover:bg-emerald-700 transition-all flex items-center gap-2"
               >
                 <MessageSquare className="w-5 h-5" />
@@ -567,54 +794,33 @@ export default function App() {
   const [showAuth, setShowAuth] = useState(false);
   const [showPost, setShowPost] = useState(false);
   const [category, setCategory] = useState('Todos');
-  const [ws, setWs] = useState<WebSocket | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-
-  const fetchProducts = async () => {
-    const res = await fetch('/api/products');
-    const data = await res.json();
-    setProducts(data);
-  };
 
   useEffect(() => {
-    fetchProducts();
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        const userDoc = await getDoc(doc(db, "users", firebaseUser.uid));
+        if (userDoc.exists()) {
+          setUser(userDoc.data() as User);
+        }
+      } else {
+        setUser(null);
+      }
+    });
+    return () => unsubscribe();
   }, []);
 
   useEffect(() => {
-    if (user) {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const socket = new WebSocket(`${protocol}//${window.location.host}`);
-      
-      socket.onopen = () => {
-        socket.send(JSON.stringify({ type: 'auth', userId: user.id }));
-      };
+    const q = query(collection(db, "products"), orderBy("created_at", "desc"), limit(50));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const prods = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as unknown as Product));
+      setProducts(prods);
+    });
+    return () => unsubscribe();
+  }, []);
 
-      socket.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.type === 'chat') {
-          setMessages(prev => [...prev, data.message]);
-          // Simple notification
-          if (data.message.sender_id !== user.id) {
-            alert(`Nova mensagem de ${data.message.sender_name}`);
-          }
-        }
-      };
-
-      setWs(socket);
-      return () => socket.close();
-    }
-  }, [user]);
-
-  const handleSendMessage = (content: string) => {
-    if (ws && user && selectedProduct) {
-      ws.send(JSON.stringify({
-        type: 'chat',
-        senderId: user.id,
-        receiverId: selectedProduct.seller_id,
-        productId: selectedProduct.id,
-        content
-      }));
-    }
+  const handleLogout = async () => {
+    await signOut(auth);
+    setUser(null);
   };
 
   const filteredProducts = category === 'Todos' 
@@ -625,7 +831,7 @@ export default function App() {
     <div className="min-h-screen bg-white font-sans text-zinc-900">
       <Navbar 
         user={user} 
-        onLogout={() => setUser(null)} 
+        onLogout={handleLogout} 
         onOpenAuth={() => setShowAuth(true)}
         onOpenPost={() => setShowPost(true)}
       />
@@ -706,14 +912,13 @@ export default function App() {
 
       {/* Modals */}
       <AnimatePresence>
-        {showAuth && <AuthModal onClose={() => setShowAuth(false)} onLogin={setUser} />}
-        {showPost && user && <PostModal user={user} onClose={() => setShowPost(false)} onPost={fetchProducts} />}
+        {showAuth && <AuthModal onClose={() => setShowAuth(false)} />}
+        {showPost && user && <PostModal user={user} onClose={() => setShowPost(false)} />}
         {selectedProduct && (
           <ProductDetail 
             product={selectedProduct} 
             user={user} 
             onClose={() => setSelectedProduct(null)} 
-            onSendMessage={handleSendMessage}
           />
         )}
       </AnimatePresence>
