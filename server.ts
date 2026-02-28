@@ -4,12 +4,21 @@ import twilio from "twilio";
 import dotenv from "dotenv";
 import Database from "better-sqlite3";
 import path from "path";
+import fs from "fs";
+import { fileURLToPath } from "url";
 
 dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = 3000;
 const db = new Database("database.db");
+
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", env: process.env.NODE_ENV });
+});
 
 // Initialize Database
 db.exec(`
@@ -199,16 +208,18 @@ app.post("/api/orders", (req, res) => {
 });
 
 // Vite middleware for development
-if (process.env.NODE_ENV !== "production") {
+const isProduction = process.env.NODE_ENV === "production" || fs.existsSync(path.resolve(__dirname, "dist"));
+
+if (!isProduction) {
   const vite = await createViteServer({
     server: { middlewareMode: true },
     appType: "spa",
   });
   app.use(vite.middlewares);
 } else {
-  app.use(express.static("dist"));
+  app.use(express.static(path.resolve(__dirname, "dist")));
   app.get("*", (req, res) => {
-    res.sendFile("dist/index.html", { root: "." });
+    res.sendFile(path.resolve(__dirname, "dist/index.html"));
   });
 }
 
