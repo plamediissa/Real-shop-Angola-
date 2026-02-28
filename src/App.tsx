@@ -15,17 +15,17 @@ import {
   Truck,
   LogOut,
   Lock,
-  ShieldCheck
+  ShieldCheck,
+  Mail
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { User, Product, Message, Review } from './types';
 import { auth, db } from './firebase';
 import { 
-  RecaptchaVerifier, 
-  signInWithPhoneNumber, 
   onAuthStateChanged, 
   signOut,
-  ConfirmationResult
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword
 } from "firebase/auth";
 import { 
   collection, 
@@ -158,134 +158,59 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onClick }) => (
 );
 
 const AuthModal = ({ onClose }: { onClose: () => void }) => {
-  const [phone, setPhone] = useState('');
-  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [code, setCode] = useState('');
+  const [name, setName] = useState('');
+  const [phone, setPhone] = useState('');
   const [role, setRole] = useState<'buyer' | 'seller'>('buyer');
-  const [step, setStep] = useState(1); // 1: Form, 2: OTP
-  const [confirmationResult, setConfirmationResult] = useState<ConfirmationResult | null>(null);
+  const [isRegistering, setIsRegistering] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!(window as any).recaptchaVerifier) {
-      try {
-        (window as any).recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
-          size: 'normal', // Mudado para normal para ser visível e mais confiável
-          callback: () => {
-            console.log('reCAPTCHA resolvido com sucesso');
-          },
-          'expired-callback': () => {
-            setError("O reCAPTCHA expirou. Por favor, tente novamente.");
-          }
+  const handleAuth = async () => {
+    setError(null);
+    if (!email.trim() || !password.trim()) {
+      setError("Por favor, preencha email e senha.");
+      return;
+    }
+
+    if (isRegistering && !name.trim()) {
+      setError("Por favor, preencha seu nome.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      if (isRegistering) {
+        const result = await createUserWithEmailAndPassword(auth, email, password);
+        const firebaseUser = result.user;
+
+        // Save user profile to Firestore
+        await setDoc(doc(db, "users", firebaseUser.uid), {
+          id: firebaseUser.uid,
+          email: email,
+          phone: phone || '',
+          name: name,
+          role: role,
+          verified: 0,
+          created_at: Timestamp.now()
         });
-        (window as any).recaptchaVerifier.render();
-      } catch (err) {
-        console.error("Erro ao inicializar Recaptcha:", err);
-      }
-    }
-    return () => {
-      if ((window as any).recaptchaVerifier) {
-        try {
-          (window as any).recaptchaVerifier.clear();
-        } catch (e) {}
-        (window as any).recaptchaVerifier = null;
-      }
-    };
-  }, []);
-
-  const handleStartRegistration = async () => {
-    setError(null);
-    if (!name.trim() || !phone.trim() || !password.trim()) {
-      setError("Por favor, preencha todos os campos obrigatórios.");
-      return;
-    }
-
-    if (phone.length < 9) {
-      setError("O número de telefone parece inválido.");
-      return;
-    }
-
-    setLoading(true);
-    try {
-      // Melhorar a formatação do número
-      let cleanPhone = phone.replace(/\D/g, ''); // Remove tudo que não é número
-      
-      // Se o usuário já digitou o código do país 244, removemos para não duplicar
-      if (cleanPhone.startsWith('244') && cleanPhone.length > 3) {
-        cleanPhone = cleanPhone.substring(3);
-      }
-      
-      const formattedPhone = `+244${cleanPhone}`;
-      console.log("Tentando enviar SMS para:", formattedPhone);
-
-      const appVerifier = (window as any).recaptchaVerifier;
-      const result = await signInWithPhoneNumber(auth, formattedPhone, appVerifier);
-      setConfirmationResult(result);
-      setStep(2);
-    } catch (err: any) {
-      console.error("SMS Error Details:", err);
-      
-      // Mensagens de erro mais específicas
-      if (err.code === 'auth/invalid-phone-number') {
-        setError("Número de telefone inválido. Verifique se digitou corretamente.");
-      } else if (err.code === 'auth/too-many-requests') {
-        setError("Muitas tentativas seguidas. Por favor, aguarde alguns minutos.");
-      } else if (err.code === 'auth/unauthorized-domain') {
-        setError("Este domínio não está autorizado no Firebase. Adicione o link do app em 'Domínios Autorizados' no Console do Firebase.");
-      } else if (err.code === 'auth/operation-not-allowed') {
-        setError("O login por telefone não está ativado no seu projeto Firebase.");
       } else {
-        setError(`Erro (${err.code || 'desconhecido'}): Verifique sua conexão e se o Phone Auth está ativo no Firebase.`);
+        await signInWithEmailAndPassword(auth, email, password);
       }
-      
-      // Resetar o recaptcha em caso de erro para permitir nova tentativa
-      if ((window as any).recaptchaVerifier) {
-        try {
-          (window as any).recaptchaVerifier.render().then((widgetId: any) => {
-            (window as any).grecaptcha.reset(widgetId);
-          });
-        } catch (e) {
-          console.error("Erro ao resetar recaptcha:", e);
-        }
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleVerifyOtp = async () => {
-    setError(null);
-    if (code.length < 6) {
-      setError("O código deve ter 6 dígitos.");
-      return;
-    }
-
-    setLoading(true);
-    try {
-      if (!confirmationResult) throw new Error("Sessão expirada. Recomece o processo.");
-      const result = await confirmationResult.confirm(code);
-      const firebaseUser = result.user;
-
-      // Save user profile to Firestore
-      await setDoc(doc(db, "users", firebaseUser.uid), {
-        id: firebaseUser.uid,
-        phone: firebaseUser.phoneNumber,
-        name: name,
-        password: password, // Note: For security, passwords should ideally be handled by Auth providers, but saving as requested
-        role: role,
-        verified: 1,
-        created_at: Timestamp.now()
-      });
-      
       onClose();
     } catch (err: any) {
-      console.error("Verify Error:", err);
-      if (err.code === 'auth/invalid-verification-code') {
-        setError("Código de verificação incorreto.");
+      console.error("Auth Error:", err);
+      if (err.code === 'auth/email-already-in-use') {
+        setError("Este email já está em uso.");
+      } else if (err.code === 'auth/invalid-email') {
+        setError("Email inválido.");
+      } else if (err.code === 'auth/weak-password') {
+        setError("A senha deve ter pelo menos 6 caracteres.");
+      } else if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
+        setError("Email ou senha incorretos.");
       } else {
-        setError("Erro ao confirmar código. Tente novamente.");
+        setError("Ocorreu um erro na autenticação. Tente novamente.");
       }
     } finally {
       setLoading(false);
@@ -299,14 +224,16 @@ const AuthModal = ({ onClose }: { onClose: () => void }) => {
         animate={{ opacity: 1, scale: 1, y: 0 }}
         className="bg-white w-full max-w-md rounded-[2.5rem] p-8 shadow-2xl relative overflow-hidden"
       >
-        <div id="recaptcha-container" className="flex justify-center mb-4 min-h-[78px]"></div>
-        
         <div className="text-center mb-8">
           <div className="w-20 h-20 bg-emerald-50 text-emerald-600 rounded-3xl flex items-center justify-center mx-auto mb-6 shadow-inner">
             <ShieldCheck className="w-10 h-10" />
           </div>
-          <h2 className="text-3xl font-black text-zinc-900 tracking-tight">Criar Conta</h2>
-          <p className="text-zinc-500 mt-2 text-sm font-medium">Real Shop Angola — Sua rede de confiança</p>
+          <h2 className="text-3xl font-black text-zinc-900 tracking-tight">
+            {isRegistering ? "Criar Conta" : "Entrar"}
+          </h2>
+          <p className="text-zinc-500 mt-2 text-sm font-medium">
+            {isRegistering ? "Junte-se à Real Shop Angola" : "Bem-vindo de volta!"}
+          </p>
         </div>
 
         {error && (
@@ -320,148 +247,112 @@ const AuthModal = ({ onClose }: { onClose: () => void }) => {
           </motion.div>
         )}
 
-        <AnimatePresence mode="wait">
-          {step === 1 ? (
-            <motion.div 
-              key="step1"
-              initial={{ opacity: 0, x: -20 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: 20 }}
-              className="space-y-5"
-            >
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Nome Completo</label>
-                  <div className="relative group">
-                    <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 group-focus-within:text-emerald-500 transition-colors" />
-                    <input 
-                      type="text" 
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                      placeholder="Ex: Manuel dos Santos"
-                      className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 focus:bg-white rounded-2xl py-4 pl-12 pr-4 outline-none transition-all text-sm font-medium"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Telefone</label>
-                  <div className="relative group">
-                    <div className="absolute left-4 top-1/2 -translate-y-1/2 flex items-center gap-2 pointer-events-none">
-                      <Phone className="w-4 h-4 text-zinc-400 group-focus-within:text-emerald-500 transition-colors" />
-                      <span className="text-sm font-bold text-zinc-400 border-r border-zinc-200 pr-2">+244</span>
-                    </div>
-                    <input 
-                      type="tel" 
-                      value={phone}
-                      onChange={(e) => setPhone(e.target.value)}
-                      placeholder="9xx xxx xxx"
-                      className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 focus:bg-white rounded-2xl py-4 pl-24 pr-4 outline-none transition-all text-sm font-medium"
-                    />
-                  </div>
-                  <p className="text-[10px] text-zinc-400 mt-1.5 ml-1 font-medium italic">Digite apenas os 9 dígitos do seu número.</p>
-                </div>
-
-                <div>
-                  <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Senha</label>
-                  <div className="relative group">
-                    <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 group-focus-within:text-emerald-500 transition-colors" />
-                    <input 
-                      type="password" 
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      placeholder="••••••••"
-                      className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 focus:bg-white rounded-2xl py-4 pl-12 pr-4 outline-none transition-all text-sm font-medium"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Tipo de Conta</label>
-                  <div className="grid grid-cols-2 gap-3">
-                    <button 
-                      onClick={() => setRole('buyer')}
-                      className={`py-3.5 rounded-2xl border-2 font-bold text-xs transition-all ${role === 'buyer' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-zinc-100 text-zinc-400 hover:border-zinc-200'}`}
-                    >
-                      Comprador
-                    </button>
-                    <button 
-                      onClick={() => setRole('seller')}
-                      className={`py-3.5 rounded-2xl border-2 font-bold text-xs transition-all ${role === 'seller' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-zinc-100 text-zinc-400 hover:border-zinc-200'}`}
-                    >
-                      Vendedor
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <button 
-                onClick={handleStartRegistration}
-                disabled={loading}
-                className="w-full bg-emerald-600 text-white py-4.5 rounded-2xl font-black hover:bg-emerald-700 transition-all shadow-xl shadow-emerald-600/20 flex items-center justify-center gap-2 mt-4 disabled:opacity-50"
-              >
-                {loading ? (
-                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                ) : (
-                  <>Criar Conta <ArrowRight className="w-5 h-5" /></>
-                )}
-              </button>
-              
-              <button 
-                onClick={onClose} 
-                className="w-full text-zinc-400 text-xs font-bold hover:text-zinc-600 transition-colors py-2"
-              >
-                Já tenho uma conta? Entrar
-              </button>
-            </motion.div>
-          ) : (
-            <motion.div 
-              key="step2"
-              initial={{ opacity: 0, x: 20 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -20 }}
-              className="space-y-8"
-            >
-              <div className="text-center space-y-2">
-                <p className="text-sm text-zinc-500 font-medium">Enviamos um código SMS para</p>
-                <p className="text-lg font-black text-zinc-900 tracking-tight">+244 {phone}</p>
-              </div>
-
+        <div className="space-y-4">
+          {isRegistering && (
+            <>
               <div>
-                <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-4 text-center">Código de 6 Dígitos</label>
-                <input 
-                  type="text" 
-                  value={code}
-                  onChange={(e) => setCode(e.target.value)}
-                  placeholder="000000"
-                  maxLength={6}
-                  className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 rounded-[2rem] py-6 px-4 outline-none transition-all text-center text-4xl tracking-[0.4em] font-black placeholder:text-zinc-200"
-                />
+                <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Nome Completo</label>
+                <div className="relative group">
+                  <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 group-focus-within:text-emerald-500 transition-colors" />
+                  <input 
+                    type="text" 
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="Ex: Manuel dos Santos"
+                    className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 focus:bg-white rounded-2xl py-4 pl-12 pr-4 outline-none transition-all text-sm font-medium"
+                  />
+                </div>
               </div>
-
-              <div className="space-y-4">
-                <button 
-                  onClick={handleVerifyOtp}
-                  disabled={code.length < 6 || loading}
-                  className="w-full bg-emerald-600 text-white py-4.5 rounded-2xl font-black hover:bg-emerald-700 transition-all shadow-xl shadow-emerald-600/20 flex items-center justify-center gap-2 disabled:opacity-50"
-                >
-                  {loading ? (
-                    <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  ) : (
-                    "Confirmar Código"
-                  )}
-                </button>
-                <button 
-                  onClick={() => setStep(1)} 
-                  disabled={loading}
-                  className="w-full text-zinc-400 text-xs font-bold hover:text-zinc-600 transition-colors"
-                >
-                  Voltar e corrigir dados
-                </button>
+              <div>
+                <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Telefone (Opcional)</label>
+                <div className="relative group">
+                  <Phone className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 group-focus-within:text-emerald-500 transition-colors" />
+                  <input 
+                    type="tel" 
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    placeholder="9xx xxx xxx"
+                    className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 focus:bg-white rounded-2xl py-4 pl-12 pr-4 outline-none transition-all text-sm font-medium"
+                  />
+                </div>
               </div>
-            </motion.div>
+            </>
           )}
-        </AnimatePresence>
+
+          <div>
+            <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Email</label>
+            <div className="relative group">
+              <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 group-focus-within:text-emerald-500 transition-colors" />
+              <input 
+                type="email" 
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="seu@email.com"
+                className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 focus:bg-white rounded-2xl py-4 pl-12 pr-4 outline-none transition-all text-sm font-medium"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Senha</label>
+            <div className="relative group">
+              <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 group-focus-within:text-emerald-500 transition-colors" />
+              <input 
+                type="password" 
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••"
+                className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 focus:bg-white rounded-2xl py-4 pl-12 pr-4 outline-none transition-all text-sm font-medium"
+              />
+            </div>
+          </div>
+
+          {isRegistering && (
+            <div>
+              <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Tipo de Conta</label>
+              <div className="grid grid-cols-2 gap-3">
+                <button 
+                  onClick={() => setRole('buyer')}
+                  className={`py-3.5 rounded-2xl border-2 font-bold text-xs transition-all ${role === 'buyer' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-zinc-100 text-zinc-400 hover:border-zinc-200'}`}
+                >
+                  Comprador
+                </button>
+                <button 
+                  onClick={() => setRole('seller')}
+                  className={`py-3.5 rounded-2xl border-2 font-bold text-xs transition-all ${role === 'seller' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-zinc-100 text-zinc-400 hover:border-zinc-200'}`}
+                >
+                  Vendedor
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <button 
+          onClick={handleAuth}
+          disabled={loading}
+          className="w-full bg-emerald-600 text-white py-4.5 rounded-2xl font-black hover:bg-emerald-700 transition-all shadow-xl shadow-emerald-600/20 flex items-center justify-center gap-2 mt-8 disabled:opacity-50"
+        >
+          {loading ? (
+            <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+          ) : (
+            <>{isRegistering ? "Criar Minha Conta" : "Entrar na Conta"} <ArrowRight className="w-5 h-5" /></>
+          )}
+        </button>
+        
+        <button 
+          onClick={() => setIsRegistering(!isRegistering)} 
+          className="w-full text-zinc-400 text-xs font-bold hover:text-zinc-600 transition-colors py-4"
+        >
+          {isRegistering ? "Já tenho uma conta? Entrar" : "Não tem uma conta? Criar agora"}
+        </button>
+
+        <button 
+          onClick={onClose} 
+          className="w-full text-zinc-300 text-[10px] font-bold hover:text-zinc-400 transition-colors"
+        >
+          Fechar
+        </button>
       </motion.div>
     </div>
   );
