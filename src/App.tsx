@@ -158,60 +158,95 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onClick }) => (
 );
 
 const AuthModal = ({ onClose }: { onClose: () => void }) => {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
+  const [name, setName] = useState('');
+  const [password, setPassword] = useState('');
+  const [code, setCode] = useState('');
   const [role, setRole] = useState<'buyer' | 'seller'>('buyer');
-  const [isRegistering, setIsRegistering] = useState(false);
+  const [step, setStep] = useState(1); // 1: Form, 2: OTP
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const handleAuth = async () => {
+  const handleSendOtp = async () => {
     setError(null);
-    if (!email.trim() || !password.trim()) {
-      setError("Por favor, preencha email e senha.");
-      return;
-    }
-
-    if (isRegistering && !name.trim()) {
-      setError("Por favor, preencha seu nome.");
+    if (!name.trim() || !phone.trim() || !password.trim()) {
+      setError("Por favor, preencha todos os campos.");
       return;
     }
 
     setLoading(true);
     try {
-      if (isRegistering) {
-        const result = await createUserWithEmailAndPassword(auth, email, password);
-        const firebaseUser = result.user;
-
-        // Save user profile to Firestore
-        await setDoc(doc(db, "users", firebaseUser.uid), {
-          id: firebaseUser.uid,
-          email: email,
-          phone: phone || '',
-          name: name,
-          role: role,
-          verified: 0,
-          created_at: Timestamp.now()
-        });
-      } else {
-        await signInWithEmailAndPassword(auth, email, password);
+      let cleanPhone = phone.replace(/\D/g, '');
+      if (cleanPhone.startsWith('244') && cleanPhone.length > 3) {
+        cleanPhone = cleanPhone.substring(3);
       }
+      const formattedPhone = `+244${cleanPhone}`;
+
+      const response = await fetch('/api/auth/send-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: formattedPhone })
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Erro ao enviar SMS");
+
+      setStep(2);
+    } catch (err: any) {
+      console.error("Twilio Error:", err);
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleVerifyOtp = async () => {
+    setError(null);
+    if (code.length < 4) {
+      setError("Código inválido.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      let cleanPhone = phone.replace(/\D/g, '');
+      if (cleanPhone.startsWith('244') && cleanPhone.length > 3) {
+        cleanPhone = cleanPhone.substring(3);
+      }
+      const formattedPhone = `+244${cleanPhone}`;
+
+      const response = await fetch('/api/auth/verify-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: formattedPhone, code })
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Código incorreto");
+
+      // Success! Create user in Firestore
+      // Using a simple ID for now since we're not using Firebase Auth for the session in this specific Twilio flow
+      const userId = `user_${Date.now()}`;
+      const userData = {
+        id: userId,
+        phone: formattedPhone,
+        name: name,
+        password: password,
+        role: role,
+        verified: 1,
+        created_at: Timestamp.now()
+      };
+
+      await setDoc(doc(db, "users", userId), userData);
+      
+      // Save to localStorage for session persistence in this demo
+      localStorage.setItem('real_shop_user', JSON.stringify(userData));
+      window.location.reload(); // Reload to update App state
+      
       onClose();
     } catch (err: any) {
-      console.error("Auth Error:", err);
-      if (err.code === 'auth/email-already-in-use') {
-        setError("Este email já está em uso.");
-      } else if (err.code === 'auth/invalid-email') {
-        setError("Email inválido.");
-      } else if (err.code === 'auth/weak-password') {
-        setError("A senha deve ter pelo menos 6 caracteres.");
-      } else if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
-        setError("Email ou senha incorretos.");
-      } else {
-        setError("Ocorreu um erro na autenticação. Tente novamente.");
-      }
+      console.error("Verify Error:", err);
+      setError(err.message);
     } finally {
       setLoading(false);
     }
@@ -229,10 +264,10 @@ const AuthModal = ({ onClose }: { onClose: () => void }) => {
             <ShieldCheck className="w-10 h-10" />
           </div>
           <h2 className="text-3xl font-black text-zinc-900 tracking-tight">
-            {isRegistering ? "Criar Conta" : "Entrar"}
+            {step === 1 ? "Criar Conta" : "Verificar Telefone"}
           </h2>
           <p className="text-zinc-500 mt-2 text-sm font-medium">
-            {isRegistering ? "Junte-se à Real Shop Angola" : "Bem-vindo de volta!"}
+            Autenticação via Twilio SMS
           </p>
         </div>
 
@@ -247,9 +282,15 @@ const AuthModal = ({ onClose }: { onClose: () => void }) => {
           </motion.div>
         )}
 
-        <div className="space-y-4">
-          {isRegistering && (
-            <>
+        <AnimatePresence mode="wait">
+          {step === 1 ? (
+            <motion.div 
+              key="step1"
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 20 }}
+              className="space-y-4"
+            >
               <div>
                 <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Nome Completo</label>
                 <div className="relative group">
@@ -263,93 +304,119 @@ const AuthModal = ({ onClose }: { onClose: () => void }) => {
                   />
                 </div>
               </div>
+
               <div>
-                <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Telefone (Opcional)</label>
+                <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Telefone</label>
                 <div className="relative group">
-                  <Phone className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 group-focus-within:text-emerald-500 transition-colors" />
+                  <div className="absolute left-4 top-1/2 -translate-y-1/2 flex items-center gap-2 pointer-events-none">
+                    <Phone className="w-4 h-4 text-zinc-400 group-focus-within:text-emerald-500 transition-colors" />
+                    <span className="text-sm font-bold text-zinc-400 border-r border-zinc-200 pr-2">+244</span>
+                  </div>
                   <input 
                     type="tel" 
                     value={phone}
                     onChange={(e) => setPhone(e.target.value)}
                     placeholder="9xx xxx xxx"
+                    className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 focus:bg-white rounded-2xl py-4 pl-24 pr-4 outline-none transition-all text-sm font-medium"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Senha</label>
+                <div className="relative group">
+                  <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 group-focus-within:text-emerald-500 transition-colors" />
+                  <input 
+                    type="password" 
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
                     className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 focus:bg-white rounded-2xl py-4 pl-12 pr-4 outline-none transition-all text-sm font-medium"
                   />
                 </div>
               </div>
-            </>
-          )}
 
-          <div>
-            <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Email</label>
-            <div className="relative group">
-              <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 group-focus-within:text-emerald-500 transition-colors" />
-              <input 
-                type="email" 
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="seu@email.com"
-                className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 focus:bg-white rounded-2xl py-4 pl-12 pr-4 outline-none transition-all text-sm font-medium"
-              />
-            </div>
-          </div>
+              <div>
+                <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Tipo de Conta</label>
+                <div className="grid grid-cols-2 gap-3">
+                  <button 
+                    onClick={() => setRole('buyer')}
+                    className={`py-3.5 rounded-2xl border-2 font-bold text-xs transition-all ${role === 'buyer' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-zinc-100 text-zinc-400 hover:border-zinc-200'}`}
+                  >
+                    Comprador
+                  </button>
+                  <button 
+                    onClick={() => setRole('seller')}
+                    className={`py-3.5 rounded-2xl border-2 font-bold text-xs transition-all ${role === 'seller' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-zinc-100 text-zinc-400 hover:border-zinc-200'}`}
+                  >
+                    Vendedor
+                  </button>
+                </div>
+              </div>
 
-          <div>
-            <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Senha</label>
-            <div className="relative group">
-              <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 group-focus-within:text-emerald-500 transition-colors" />
-              <input 
-                type="password" 
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 focus:bg-white rounded-2xl py-4 pl-12 pr-4 outline-none transition-all text-sm font-medium"
-              />
-            </div>
-          </div>
+              <button 
+                onClick={handleSendOtp}
+                disabled={loading}
+                className="w-full bg-emerald-600 text-white py-4.5 rounded-2xl font-black hover:bg-emerald-700 transition-all shadow-xl shadow-emerald-600/20 flex items-center justify-center gap-2 mt-4 disabled:opacity-50"
+              >
+                {loading ? (
+                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                ) : (
+                  <>Enviar Código SMS <ArrowRight className="w-5 h-5" /></>
+                )}
+              </button>
+            </motion.div>
+          ) : (
+            <motion.div 
+              key="step2"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              className="space-y-8"
+            >
+              <div className="text-center space-y-2">
+                <p className="text-sm text-zinc-500 font-medium">Enviamos um código Twilio para</p>
+                <p className="text-lg font-black text-zinc-900 tracking-tight">+244 {phone}</p>
+              </div>
 
-          {isRegistering && (
-            <div>
-              <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-2 ml-1">Tipo de Conta</label>
-              <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em] mb-4 text-center">Código de Verificação</label>
+                <input 
+                  type="text" 
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  placeholder="0000"
+                  className="w-full bg-zinc-50 border-2 border-transparent focus:border-emerald-500 rounded-[2rem] py-6 px-4 outline-none transition-all text-center text-4xl tracking-[0.4em] font-black placeholder:text-zinc-200"
+                />
+              </div>
+
+              <div className="space-y-4">
                 <button 
-                  onClick={() => setRole('buyer')}
-                  className={`py-3.5 rounded-2xl border-2 font-bold text-xs transition-all ${role === 'buyer' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-zinc-100 text-zinc-400 hover:border-zinc-200'}`}
+                  onClick={handleVerifyOtp}
+                  disabled={loading}
+                  className="w-full bg-emerald-600 text-white py-4.5 rounded-2xl font-black hover:bg-emerald-700 transition-all shadow-xl shadow-emerald-600/20 flex items-center justify-center gap-2 disabled:opacity-50"
                 >
-                  Comprador
+                  {loading ? (
+                    <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  ) : (
+                    "Confirmar e Entrar"
+                  )}
                 </button>
                 <button 
-                  onClick={() => setRole('seller')}
-                  className={`py-3.5 rounded-2xl border-2 font-bold text-xs transition-all ${role === 'seller' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-zinc-100 text-zinc-400 hover:border-zinc-200'}`}
+                  onClick={() => setStep(1)} 
+                  disabled={loading}
+                  className="w-full text-zinc-400 text-xs font-bold hover:text-zinc-600 transition-colors"
                 >
-                  Vendedor
+                  Voltar
                 </button>
               </div>
-            </div>
+            </motion.div>
           )}
-        </div>
-
-        <button 
-          onClick={handleAuth}
-          disabled={loading}
-          className="w-full bg-emerald-600 text-white py-4.5 rounded-2xl font-black hover:bg-emerald-700 transition-all shadow-xl shadow-emerald-600/20 flex items-center justify-center gap-2 mt-8 disabled:opacity-50"
-        >
-          {loading ? (
-            <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-          ) : (
-            <>{isRegistering ? "Criar Minha Conta" : "Entrar na Conta"} <ArrowRight className="w-5 h-5" /></>
-          )}
-        </button>
-        
-        <button 
-          onClick={() => setIsRegistering(!isRegistering)} 
-          className="w-full text-zinc-400 text-xs font-bold hover:text-zinc-600 transition-colors py-4"
-        >
-          {isRegistering ? "Já tenho uma conta? Entrar" : "Não tem uma conta? Criar agora"}
-        </button>
+        </AnimatePresence>
 
         <button 
           onClick={onClose} 
-          className="w-full text-zinc-300 text-[10px] font-bold hover:text-zinc-400 transition-colors"
+          className="w-full text-zinc-300 text-[10px] font-bold hover:text-zinc-400 transition-colors mt-4"
         >
           Fechar
         </button>
@@ -724,14 +791,19 @@ export default function App() {
   const [category, setCategory] = useState('Todos');
 
   useEffect(() => {
+    // Check localStorage for Twilio session
+    const savedUser = localStorage.getItem('real_shop_user');
+    if (savedUser) {
+      setUser(JSON.parse(savedUser));
+    }
+
+    // Still keep Firebase Auth for other potential features
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
+      if (firebaseUser && !savedUser) {
         const userDoc = await getDoc(doc(db, "users", firebaseUser.uid));
         if (userDoc.exists()) {
           setUser(userDoc.data() as User);
         }
-      } else {
-        setUser(null);
       }
     });
     return () => unsubscribe();
@@ -748,7 +820,9 @@ export default function App() {
 
   const handleLogout = async () => {
     await signOut(auth);
+    localStorage.removeItem('real_shop_user');
     setUser(null);
+    window.location.reload();
   };
 
   const filteredProducts = category === 'Todos' 
