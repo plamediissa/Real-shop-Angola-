@@ -14,66 +14,89 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = 3000;
-const db = new Database("database.db");
 
-app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", env: process.env.NODE_ENV });
+// Middleware de Log para diagnóstico
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+  next();
 });
-
-// Initialize Database
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
-    name TEXT,
-    phone TEXT,
-    password TEXT,
-    role TEXT,
-    verified INTEGER,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS products (
-    id TEXT PRIMARY KEY,
-    seller_id TEXT,
-    seller_name TEXT,
-    seller_verified INTEGER,
-    name TEXT,
-    description TEXT,
-    price REAL,
-    location TEXT,
-    category TEXT,
-    image_url TEXT,
-    delivery_method TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS messages (
-    id TEXT PRIMARY KEY,
-    sender_id TEXT,
-    sender_name TEXT,
-    receiver_id TEXT,
-    product_id TEXT,
-    content TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS orders (
-    id TEXT PRIMARY KEY,
-    product_id TEXT,
-    buyer_id TEXT,
-    status TEXT,
-    payment_method TEXT,
-    payment_reference TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-`);
 
 app.use(express.json());
 
-const twilioClient = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
+// Banco de dados com caminho absoluto e tratamento de erro
+const dbPath = path.resolve(__dirname, "database.db");
+let db: any;
+
+try {
+  db = new Database(dbPath);
+  console.log(`Banco de dados inicializado em: ${dbPath}`);
+  
+  // Initialize Database
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      phone TEXT,
+      password TEXT,
+      role TEXT,
+      verified INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS products (
+      id TEXT PRIMARY KEY,
+      seller_id TEXT,
+      seller_name TEXT,
+      seller_verified INTEGER,
+      name TEXT,
+      description TEXT,
+      price REAL,
+      location TEXT,
+      category TEXT,
+      image_url TEXT,
+      delivery_method TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS messages (
+      id TEXT PRIMARY KEY,
+      sender_id TEXT,
+      sender_name TEXT,
+      receiver_id TEXT,
+      product_id TEXT,
+      content TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS orders (
+      id TEXT PRIMARY KEY,
+      product_id TEXT,
+      buyer_id TEXT,
+      status TEXT,
+      payment_method TEXT,
+      payment_reference TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+} catch (error) {
+  console.error("Erro crítico ao inicializar banco de dados:", error);
+}
+
+app.use(express.json());
+
+app.get("/api/health", (req, res) => {
+  res.json({ 
+    status: "ok", 
+    env: process.env.NODE_ENV,
+    db: dbPath,
+    isProduction: fs.existsSync(path.resolve(__dirname, "dist")),
+    twilio: !!process.env.TWILIO_ACCOUNT_SID
+  });
+});
+
+const twilioClient = (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) 
+  ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
+  : null;
 
 const verifyServiceSid = process.env.TWILIO_VERIFY_SERVICE_SID || "MG56cd03c0af9701f57285756aecee3842";
 
@@ -88,7 +111,7 @@ app.post("/api/auth/send-otp", async (req, res) => {
     const code = Math.floor(1000 + Math.random() * 9000).toString();
     otpStore.set(phone, { code, expires: Date.now() + 600000 });
 
-    if (process.env.TWILIO_ACCOUNT_SID) {
+    if (twilioClient) {
       await twilioClient.messages.create({
         body: `Seu código de verificação Real Shop é: ${code}`,
         to: phone,
@@ -208,7 +231,10 @@ app.post("/api/orders", (req, res) => {
 });
 
 // Vite middleware for development
-const isProduction = process.env.NODE_ENV === "production" || fs.existsSync(path.resolve(__dirname, "dist"));
+const distPath = path.resolve(__dirname, "dist");
+const isProduction = process.env.NODE_ENV === "production" || fs.existsSync(distPath);
+
+console.log(`Modo: ${isProduction ? 'Produção' : 'Desenvolvimento'}`);
 
 if (!isProduction) {
   const vite = await createViteServer({
@@ -217,12 +243,26 @@ if (!isProduction) {
   });
   app.use(vite.middlewares);
 } else {
-  app.use(express.static(path.resolve(__dirname, "dist")));
+  console.log(`Servindo arquivos estáticos de: ${distPath}`);
+  app.use(express.static(distPath));
   app.get("*", (req, res) => {
-    res.sendFile(path.resolve(__dirname, "dist/index.html"));
+    // Se for uma rota de API que não existe, não manda o index.html
+    if (req.url.startsWith('/api/')) {
+      return res.status(404).json({ error: "Rota de API não encontrada" });
+    }
+    res.sendFile(path.resolve(distPath, "index.html"));
   });
 }
 
+// Error Handler Global para evitar respostas HTML em erros de API
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error("Erro não tratado:", err);
+  res.status(500).json({ 
+    error: "Erro interno do servidor",
+    message: err.message 
+  });
+});
+
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+  console.log(`Servidor Real Shop rodando em http://0.0.0.0:${PORT}`);
 });
