@@ -20,26 +20,6 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { User, Product, Message, Review } from './types';
-import { auth, db } from './firebase';
-import { 
-  onAuthStateChanged, 
-  signOut,
-  createUserWithEmailAndPassword,
-  signInWithEmailAndPassword
-} from "firebase/auth";
-import { 
-  collection, 
-  addDoc, 
-  query, 
-  onSnapshot, 
-  orderBy, 
-  where, 
-  doc, 
-  getDoc, 
-  setDoc,
-  Timestamp,
-  limit
-} from "firebase/firestore";
 
 // --- Components ---
 
@@ -218,29 +198,20 @@ const AuthModal = ({ onClose }: { onClose: () => void }) => {
       const response = await fetch('/api/auth/verify-otp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone: formattedPhone, code })
+        body: JSON.stringify({ 
+          phone: formattedPhone, 
+          code,
+          name,
+          password,
+          role
+        })
       });
 
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Código incorreto");
 
-      // Success! Create user in Firestore
-      // Using a simple ID for now since we're not using Firebase Auth for the session in this specific Twilio flow
-      const userId = `user_${Date.now()}`;
-      const userData = {
-        id: userId,
-        phone: formattedPhone,
-        name: name,
-        password: password,
-        role: role,
-        verified: 1,
-        created_at: Timestamp.now()
-      };
-
-      await setDoc(doc(db, "users", userId), userData);
-      
-      // Save to localStorage for session persistence in this demo
-      localStorage.setItem('real_shop_user', JSON.stringify(userData));
+      // Success!
+      localStorage.setItem('real_shop_user', JSON.stringify(data));
       window.location.reload(); // Reload to update App state
       
       onClose();
@@ -451,15 +422,22 @@ const PostModal = ({ user, onClose }: { user: User, onClose: () => void }) => {
   const handleSubmit = async () => {
     setLoading(true);
     try {
-      await addDoc(collection(db, "products"), {
-        ...form,
-        seller_id: user.id,
-        seller_name: user.name,
-        seller_verified: user.verified || 0,
-        price: parseFloat(form.price),
-        created_at: Timestamp.now()
+      const response = await fetch('/api/products', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...form,
+          seller_id: user.id,
+          seller_name: user.name,
+          seller_verified: user.verified || 0,
+          price: parseFloat(form.price)
+        })
       });
+
+      if (!response.ok) throw new Error("Erro ao publicar");
+      
       onClose();
+      window.location.reload(); // Refresh to show new product
     } catch (error) {
       console.error("Post Error:", error);
       alert("Erro ao publicar produto.");
@@ -608,13 +586,16 @@ const ProductDetail = ({ product, user, onClose }: { product: Product, user: Use
     const reference = Math.floor(100000000 + Math.random() * 900000000).toString();
     const entity = "00123";
     
-    await addDoc(collection(db, "orders"), {
-      product_id: product.id,
-      buyer_id: user.id,
-      status: 'pending',
-      payment_method: 'multicaixa',
-      payment_reference: reference,
-      created_at: Timestamp.now()
+    await fetch('/api/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        product_id: product.id,
+        buyer_id: user.id,
+        status: 'pending',
+        payment_method: 'multicaixa',
+        payment_reference: reference
+      })
     });
 
     setPaymentRef({ entity, reference });
@@ -622,13 +603,16 @@ const ProductDetail = ({ product, user, onClose }: { product: Product, user: Use
 
   const handleSendMessage = async () => {
     if (!user || !message.trim()) return;
-    await addDoc(collection(db, "messages"), {
-      sender_id: user.id,
-      sender_name: user.name,
-      receiver_id: product.seller_id,
-      product_id: product.id,
-      content: message,
-      created_at: Timestamp.now()
+    await fetch('/api/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sender_id: user.id,
+        sender_name: user.name,
+        receiver_id: product.seller_id,
+        product_id: product.id,
+        content: message
+      })
     });
     setMessage('');
     alert("Mensagem enviada!");
@@ -791,35 +775,33 @@ export default function App() {
   const [category, setCategory] = useState('Todos');
 
   useEffect(() => {
-    // Check localStorage for Twilio session
+    // Check localStorage for session
     const savedUser = localStorage.getItem('real_shop_user');
     if (savedUser) {
       setUser(JSON.parse(savedUser));
     }
-
-    // Still keep Firebase Auth for other potential features
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser && !savedUser) {
-        const userDoc = await getDoc(doc(db, "users", firebaseUser.uid));
-        if (userDoc.exists()) {
-          setUser(userDoc.data() as User);
-        }
-      }
-    });
-    return () => unsubscribe();
   }, []);
 
   useEffect(() => {
-    const q = query(collection(db, "products"), orderBy("created_at", "desc"), limit(50));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const prods = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as unknown as Product));
-      setProducts(prods);
-    });
-    return () => unsubscribe();
+    const fetchProducts = async () => {
+      try {
+        const response = await fetch('/api/products');
+        if (response.ok) {
+          const data = await response.json();
+          setProducts(data);
+        }
+      } catch (error) {
+        console.error("Error fetching products:", error);
+      }
+    };
+
+    fetchProducts();
+    // Poll for updates every 30 seconds as a simple replacement for onSnapshot
+    const interval = setInterval(fetchProducts, 30000);
+    return () => clearInterval(interval);
   }, []);
 
-  const handleLogout = async () => {
-    await signOut(auth);
+  const handleLogout = () => {
     localStorage.removeItem('real_shop_user');
     setUser(null);
     window.location.reload();
